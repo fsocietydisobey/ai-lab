@@ -1,19 +1,13 @@
-"""Distiller — extract structured training pairs from a session transcript.
-
-Calls Claude API to distill a raw session transcript into instruction-response
-pairs suitable for LoRA fine-tuning. Each pair captures one domain insight:
-a pattern, footgun, key file note, or open question the lead discovered.
-"""
+"""Distiller — session transcript → structured training pairs for LoRA fine-tuning."""
 
 from __future__ import annotations
 
 import json
+
 import anthropic
 
 from mnemosyne import store
 
-
-_CLIENT = anthropic.Anthropic()
 
 _SYSTEM = """\
 You are a knowledge distiller for a software engineering AI system. You receive
@@ -39,9 +33,12 @@ Rules:
 """
 
 
+def _client() -> anthropic.Anthropic:
+    return anthropic.Anthropic()
+
+
 def distill(transcript: str, domain: str, session_slug: str = "") -> list[dict]:
-    """Distill a session transcript into training pairs and append to store."""
-    msg = _CLIENT.messages.create(
+    msg = _client().messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=4096,
         system=_SYSTEM,
@@ -53,7 +50,6 @@ def distill(transcript: str, domain: str, session_slug: str = "") -> list[dict]:
         ],
     )
     text = msg.content[0].text.strip()
-    # Extract JSON array from response
     start = text.find("[")
     end = text.rfind("]") + 1
     if start == -1 or end == 0:

@@ -1,46 +1,34 @@
-"""Querier — answer domain memory questions from lead sessions.
-
-Phase 1: uses the base model + injected training data as context (no fine-tune yet).
-Phase 2: queries the LoRA-adapted model directly once training pipeline is ready.
-"""
+"""Querier — answer domain memory questions using accumulated training pairs as context."""
 
 from __future__ import annotations
-
-import json
-from pathlib import Path
 
 import anthropic
 
 from mnemosyne import store
 
 
-_CLIENT = anthropic.Anthropic()
-_TOP_K = 20  # max training pairs to inject per query
+_TOP_K = 20
+
+
+def _client() -> anthropic.Anthropic:
+    return anthropic.Anthropic()
 
 
 def query(domain: str, question: str) -> str:
-    """Answer a domain memory question using accumulated training data as context."""
     pairs = store.load(domain)
     if not pairs:
         return f"No accumulated memory for domain '{domain}' yet."
 
-    # Most recent pairs first (recency bias — newer knowledge takes precedence)
-    pairs = pairs[-_TOP_K:]
-
     context_blocks = "\n\n".join(
-        f"Q: {p['instruction']}\nA: {p['response']}" for p in pairs
+        f"Q: {p['instruction']}\nA: {p['response']}" for p in pairs[-_TOP_K:]
     )
-
-    system = f"""\
-You are a domain memory oracle for the '{domain}' engineering domain.
-Answer questions using ONLY the accumulated knowledge below — do not add
-general best practices or assumptions. If the knowledge doesn't cover the
-question, say so explicitly.
-
-Accumulated domain knowledge:
-{context_blocks}
-"""
-    msg = _CLIENT.messages.create(
+    system = (
+        f"You are a domain memory oracle for the '{domain}' engineering domain. "
+        f"Answer questions using ONLY the accumulated knowledge below — do not add "
+        f"general best practices or assumptions. If the knowledge doesn't cover the "
+        f"question, say so explicitly.\n\nAccumulated domain knowledge:\n{context_blocks}"
+    )
+    msg = _client().messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         system=system,
