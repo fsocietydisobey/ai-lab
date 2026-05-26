@@ -1,65 +1,108 @@
-"""Distiller — session transcript → structured training pairs for LoRA fine-tuning."""
+"""Distiller — session transcript → training pairs, no external API.
+
+Extracts meaningful text blocks from Claude Code session JSONL or plain text
+transcripts and stores them as instruction-response pairs. The lead session
+(which is already Claude) synthesises meaning at query time from the raw pairs.
+"""
 
 from __future__ import annotations
 
 import json
-
-import anthropic
+import re
 
 from mnemosyne import store
 
 
-_SYSTEM = """\
-You are a knowledge distiller for a software engineering AI system. You receive
-a session transcript from a domain lead (a specialist AI agent) and extract
-structured knowledge that should persist across session boundaries.
+_MIN_CHARS = 100
+_MAX_CHARS = 2000
 
-Output a JSON array of instruction-response pairs. Each pair captures ONE
-distinct insight the lead gained — a pattern, footgun, key file, design
-decision, or bug fix. Aim for 5-20 pairs per transcript.
-
-Format each pair as:
-{
-  "instruction": "What does this codebase do regarding <specific topic>?",
-  "response": "<concise, specific answer based on what the lead actually learned>"
-}
-
-Rules:
-- Only extract knowledge that generalizes beyond this specific task
-- Instruction must be a natural question a future lead would ask
-- Response must be specific to THIS codebase, not general best practices
-- Skip tool call noise, errors, and intermediate reasoning
-- Prefer concrete over abstract ("uses controlled inputs via X pattern" > "uses React patterns")
-"""
+_TOPIC_PATTERNS = [
+    (r"key file[s]?[:]\s*(.+?)(?:\n|$)", "What is the key file for {}?"),
+    (r"the fix(?:\s+was|:)\s*(.+?)(?:\n|$)", "How was this fixed: {}?"),
+    (r"pattern[:]\s*(.+?)(?:\n|$)", "What pattern is used for {}?"),
+    (r"footgun[:]\s*(.+?)(?:\n|$)", "What is the footgun around {}?"),
+]
 
 
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic()
+def _extract_blocks(transcript: str) -> list[str]:
+    blocks: list[str] = []
+
+    # Path 1 — Claude Code JSONL (role=assistant, content=[{type:text}])
+    jsonl_hit = False
+    for line in transcript.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        jsonl_hit = True
+        role = record.get("role") or record.get("type", "")
+        if role != "assistant":
+            continue
+        content = record.get("content", "")
+        if isinstance(content, str) and content.strip():
+            blocks.append(content.strip())
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "").strip()
+                    if text:
+                        blocks.append(text)
+
+    if jsonl_hit:
+        return blocks
+
+    # Path 2 — plain text with Assistant: / assistant: markers
+    for match in re.finditer(
+        r"(?:^|\n)(?:Assistant|assistant):\s*(.+?)(?=\n(?:Human|User|assistant|Assistant):|$)",
+        transcript,
+        re.DOTALL,
+    ):
+        text = match.group(1).strip()
+        if text:
+            blocks.append(text)
+
+    if blocks:
+        return blocks
+
+    # Path 3 — plain prose: split on double newlines, keep substantial paragraphs
+    for para in re.split(r"\n\s*\n", transcript):
+        para = para.strip()
+        if len(para) >= _MIN_CHARS:
+            blocks.append(para)
+
+    return blocks
+
+
+def _make_instruction(text: str, domain: str) -> str:
+    lower = text.lower()
+    for pattern, template in _TOPIC_PATTERNS:
+        m = re.search(pattern, lower)
+        if m:
+            topic = m.group(1).strip()[:80]
+            return template.format(topic)
+    first = re.split(r"[.!?\n]", text)[0].strip()[:100]
+    if len(first) > 15:
+        return f"What does the {domain} layer do regarding: {first}?"
+    return f"What did the {domain} lead learn about {domain} in this session?"
 
 
 def distill(transcript: str, domain: str, session_slug: str = "") -> list[dict]:
-    msg = _client().messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=4096,
-        system=_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Domain: {domain}\n\nTranscript:\n{transcript[:50000]}",
-            }
-        ],
-    )
-    text = msg.content[0].text.strip()
-    start = text.find("[")
-    end = text.rfind("]") + 1
-    if start == -1 or end == 0:
-        return []
-    pairs = json.loads(text[start:end])
-    for pair in pairs:
+    """Extract and store training pairs from a transcript without any API call."""
+    blocks = _extract_blocks(transcript[:50000])
+    pairs: list[dict] = []
+    for block in blocks:
+        if len(block) < _MIN_CHARS:
+            continue
+        response = block[:_MAX_CHARS]
+        instruction = _make_instruction(block, domain)
         store.append(
             domain=domain,
-            instruction=pair.get("instruction", ""),
-            response=pair.get("response", ""),
+            instruction=instruction,
+            response=response,
             source_session=session_slug,
         )
+        pairs.append({"instruction": instruction, "response": response})
     return pairs
