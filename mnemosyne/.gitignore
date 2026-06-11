@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Training artifacts (large / generated — reproduce with scripts/)
+models/        # downloaded base models (HF cache)
+adapters/      # trained LoRA adapters + merged models
+corpora/       # assembled CPT corpora
+data/          # distilled training pairs (JSONL per domain)
