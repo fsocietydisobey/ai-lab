@@ -64,3 +64,15 @@ python scripts/merge_adapter.py --base Qwen/Qwen2.5-Coder-1.5B \
 python scripts/train.py --model models/merged-<name> \
     --domain "<project>:*" --out-name sft-<name>
 ```
+
+## Watching training live
+
+Text loss prints every 10 steps to stdout. For live **curves**, both scripts write
+TensorBoard event files to `runs/` when `tensorboard` is installed (graceful no-op
+otherwise):
+
+```bash
+pip install tensorboard
+tensorboard --logdir runs/    # open http://localhost:6006
+```
+Or stream the text loss: `tail -f <logfile> | grep --line-buffered "'loss'"`.

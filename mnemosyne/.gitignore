@@ -8,4 +8,5 @@ __pycache__/
 models/        # downloaded base models (HF cache)
 adapters/      # trained LoRA adapters + merged models
 corpora/       # assembled CPT corpora
+runs/          # TensorBoard event files (tensorboard --logdir runs/)
 data/          # distilled training pairs (JSONL per domain)

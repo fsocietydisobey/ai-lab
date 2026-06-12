@@ -27,6 +27,20 @@ from pathlib import Path
 
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 ADAPTERS_DIR = Path(__file__).resolve().parent.parent / "adapters"
+RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
+
+
+def _reporters() -> list[str]:
+    """Enable TensorBoard live curves if installed; else fall back to text logs.
+    Watch with: tensorboard --logdir runs/"""
+    try:
+        import tensorboard  # noqa: F401
+
+        return ["tensorboard"]
+    except ImportError:
+        print("[*] tensorboard not installed — text loss logs only. "
+              "`pip install tensorboard` for live curves (tensorboard --logdir runs/).")
+        return []
 
 
 def main() -> None:
@@ -106,7 +120,8 @@ def main() -> None:
             per_device_eval_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             bf16=use_bf16, fp16=not use_bf16,
-            logging_steps=10, save_strategy="no", report_to=[],
+            logging_steps=10, save_strategy="no",
+            report_to=_reporters(), logging_dir=str(RUNS_DIR / f"cpt-{args.out_name}"),
             learning_rate=2e-4, warmup_ratio=0.03, lr_scheduler_type="cosine",
         ),
         train_dataset=train_ds,

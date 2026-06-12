@@ -27,6 +27,20 @@ from pathlib import Path
 
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 ADAPTERS_DIR = Path(__file__).resolve().parent.parent / "adapters"
+RUNS_DIR = Path(__file__).resolve().parent.parent / "runs"
+
+
+def _reporters() -> list[str]:
+    """Enable TensorBoard live curves if installed; else fall back to text logs.
+    Watch with: tensorboard --logdir runs/"""
+    try:
+        import tensorboard  # noqa: F401
+
+        return ["tensorboard"]
+    except ImportError:
+        print("[*] tensorboard not installed — text loss logs only. "
+              "`pip install tensorboard` for live curves (tensorboard --logdir runs/).")
+        return []
 
 
 def main() -> None:
@@ -116,7 +130,8 @@ def main() -> None:
             fp16=True,
             logging_steps=10,
             save_strategy="epoch",
-            report_to=[],
+            report_to=_reporters(),
+            logging_dir=str(RUNS_DIR / f"sft-{out_name}"),
         ),
         train_dataset=dataset.map(tokenize, batched=True, remove_columns=["text"]),
     )
