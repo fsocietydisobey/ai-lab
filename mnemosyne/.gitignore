@@ -5,8 +5,13 @@ __pycache__/
 *.egg-info/
 
 # Training artifacts (large / generated — reproduce with scripts/)
-models/        # downloaded base models (HF cache)
-adapters/      # trained LoRA adapters + merged models
-corpora/       # assembled CPT corpora
-runs/          # TensorBoard event files (tensorboard --logdir runs/)
-data/          # distilled training pairs (JSONL per domain)
+# downloaded base models (HF cache)
+models/
+# trained LoRA adapters + merged models
+adapters/
+# assembled CPT corpora
+corpora/
+# TensorBoard event files (tensorboard --logdir runs/)
+runs/
+# distilled training pairs (JSONL per domain)
+data/
