@@ -27,7 +27,9 @@ log "building CPT corpus from $KHIMAIRA_REPO ..."
 "$PY" scripts/build_corpus.py --repo "$KHIMAIRA_REPO" --out-dir corpora/khimaira --eval-frac 0.1 \
   || die "corpus build"
 log "exporting SFT pairs from mnemosyne store ..."
-"$PY" scripts/export_sft_pairs.py --prefixes khimaira general --out corpora/sft_khimaira.jsonl \
+"$PY" scripts/export_sft_pairs.py --prefixes khimaira general \
+  --extra-jsonl corpora/ground_truth_khimaira.jsonl \
+  --out corpora/sft_khimaira.jsonl \
   || die "pairs export"
 
 # 2. Ship corpus + scripts to spark (only text artifacts).

@@ -22,6 +22,14 @@ def main() -> None:
     ap.add_argument("--prefixes", nargs="+", default=["khimaira", "general"],
                     help="Domain prefixes to include (e.g. khimaira general).")
     ap.add_argument("--out", required=True, help="Output JSONL path.")
+    ap.add_argument(
+        "--extra-jsonl",
+        action="append",
+        default=[],
+        help="Curated JSONL of canonical {instruction,response} pairs to merge "
+        "in (deduped). Repeatable. Use for hand-written ground-truth facts the "
+        "distilled store gets wrong (e.g. ports, storage model).",
+    )
     args = ap.parse_args()
 
     doms = [
@@ -45,6 +53,28 @@ def main() -> None:
             rows.append({"instruction": ins, "response": resp})
             pref = d.split(":", 1)[0]
             by_prefix[pref] = by_prefix.get(pref, 0) + 1
+
+    # Merge curated ground-truth pairs last (deduped). These pin canonical facts
+    # the distilled store fabricates; adding them is pure-addition (no good-pair loss).
+    gt = 0
+    for path in args.extra_jsonl:
+        with open(path, encoding="utf-8") as ef:
+            for line in ef:
+                line = line.strip()
+                if not line:
+                    continue
+                p = json.loads(line)
+                ins, resp = p.get("instruction"), p.get("response")
+                if not (ins and resp):
+                    continue
+                key = (ins, resp)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"instruction": ins, "response": resp})
+                gt += 1
+    if gt:
+        by_prefix["ground_truth"] = gt
 
     with open(args.out, "w", encoding="utf-8") as f:
         for r in rows:
