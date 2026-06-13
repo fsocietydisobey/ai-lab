@@ -32,6 +32,9 @@ def main() -> None:
     ap.add_argument("--adapter", default="", help="Optional LoRA adapter to stack on top")
     ap.add_argument("--prompt", action="append", help="Prompt (repeatable; defaults to a builtin set)")
     ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument("--raw", action="store_true",
+                    help="Raw completion (no ### Instruction wrapper) — for CPT/base "
+                         "models that have not been SFT'd into instruction-following yet.")
     args = ap.parse_args()
 
     import torch
@@ -49,8 +52,8 @@ def main() -> None:
 
     prompts = args.prompt or DEFAULT_PROMPTS
     for p in prompts:
-        # match train.py's SFT format
-        text = f"### Instruction:\n{p}\n\n### Response:\n"
+        # raw completion for CPT/base models; instruction wrapper for SFT'd models
+        text = p if args.raw else f"### Instruction:\n{p}\n\n### Response:\n"
         ids = tok(text, return_tensors="pt").to(model.device)
         with torch.no_grad():
             out = model.generate(

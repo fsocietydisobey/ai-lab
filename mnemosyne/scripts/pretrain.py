@@ -52,6 +52,13 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--lora-r", type=int, default=32)
+    ap.add_argument("--full-ft", action="store_true",
+                    help="Full fine-tune ALL params (bakes the codebase into the base "
+                         "weights, not an adapter). Uses Adafactor + a low LR. "
+                         "Default: LoRA.")
+    ap.add_argument("--lr", type=float, default=None,
+                    help="Learning rate. Default: 2e-4 (LoRA) / 1e-5 (full-FT, "
+                         "conservative to limit catastrophic forgetting).")
     ap.add_argument("--out-name", default="cpt-khimaira")
     args = ap.parse_args()
 
@@ -92,25 +99,38 @@ def main() -> None:
 
     t0 = time.time()
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, cache_dir=MODELS_DIR, torch_dtype=dtype, device_map="auto",
+        args.model, cache_dir=MODELS_DIR, torch_dtype=dtype,
+        # device_map="auto" pre-shards for inference and fights Trainer's own
+        # device handling during full-FT; let Trainer/accelerate place it then.
+        device_map=None if args.full_ft else "auto",
     )
     print(f"[cpt] model loaded in {time.time()-t0:.0f}s")
 
-    model = get_peft_model(
-        model,
-        LoraConfig(
-            task_type=TaskType.CAUSAL_LM, r=args.lora_r, lora_alpha=args.lora_r * 2,
-            lora_dropout=0.05,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj"],
-        ),
-    )
-    model.print_trainable_parameters()
-    model.config.use_cache = False
-    model.gradient_checkpointing_enable()
-    model.enable_input_require_grads()  # required: grad ckpt + frozen base + LoRA
+    if args.full_ft:
+        # Full fine-tune: every weight trains → the codebase lands in the base
+        # weights, not an adapter. No merge step; the saved model IS the result.
+        n_params = sum(p.numel() for p in model.parameters())
+        print(f"[cpt] FULL fine-tune — all {n_params/1e9:.2f}B params trainable "
+              f"(optimizer=adafactor, lr defaults low to limit forgetting)")
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
+    else:
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                task_type=TaskType.CAUSAL_LM, r=args.lora_r, lora_alpha=args.lora_r * 2,
+                lora_dropout=0.05,
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                                "gate_proj", "up_proj", "down_proj"],
+            ),
+        )
+        model.print_trainable_parameters()
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()  # required: grad ckpt + frozen base + LoRA
 
-    out_dir = ADAPTERS_DIR / args.out_name
+    lr = args.lr if args.lr is not None else (1e-5 if args.full_ft else 2e-4)
+    out_dir = (MODELS_DIR if args.full_ft else ADAPTERS_DIR) / args.out_name
     trainer = Trainer(
         model=model,
         args=TrainingArguments(
@@ -122,7 +142,10 @@ def main() -> None:
             bf16=use_bf16, fp16=not use_bf16,
             logging_steps=10, save_strategy="no",
             report_to=_reporters(), logging_dir=str(RUNS_DIR / f"cpt-{args.out_name}"),
-            learning_rate=2e-4, warmup_ratio=0.03, lr_scheduler_type="cosine",
+            learning_rate=lr, warmup_ratio=0.03, lr_scheduler_type="cosine",
+            # full-FT: Adafactor's factored 2nd-moment keeps optimizer state tiny
+            # (~GBs not ~80GB), the difference between fitting and OOM at 7B.
+            optim="adafactor" if args.full_ft else "adamw_torch",
         ),
         train_dataset=train_ds,
         eval_dataset=eval_ds,
@@ -146,7 +169,10 @@ def main() -> None:
 
     model.save_pretrained(out_dir)
     tok.save_pretrained(out_dir)
-    print(f"[cpt] adapter saved → {out_dir}")
+    if args.full_ft:
+        print(f"[cpt] full model saved → {out_dir}  (ready to serve / SFT — no merge step)")
+    else:
+        print(f"[cpt] adapter saved → {out_dir}  (merge with merge_adapter.py before serving)")
 
 
 if __name__ == "__main__":
