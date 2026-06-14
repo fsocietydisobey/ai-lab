@@ -24,9 +24,16 @@ resft() {  # $1=name (jeevy|khimaira)  $2=cpt-model-dir  $3=pairs  $4=vllm-conta
     echo "[resft] $name VALIDATE FAILED (new model $sz < 10GB) — keeping old"; docker start "$cont" >/dev/null 2>&1; return 1
   fi
   echo "[resft $(date '+%T')] swap (keep .prev) + restart $name vLLM ..."
-  rm -rf "models/sft7b-$name.prev"
-  [ -d "models/sft7b-$name" ] && mv "models/sft7b-$name" "models/sft7b-$name.prev"
-  mv "models/sft7b-$name-new" "models/sft7b-$name"
+  # Model dirs are root-owned (written by the training container) — the host
+  # user can't mv them. Swap as root via a throwaway container; `bash -euc`
+  # aborts on a failed mv so we never falsely claim success on a stale model.
+  docker run --rm -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05 \
+    bash -euc "
+      cd /workspace/mnemosyne/models
+      rm -rf sft7b-$name.prev
+      if [ -d sft7b-$name ]; then mv sft7b-$name sft7b-$name.prev; fi
+      mv sft7b-$name-new sft7b-$name
+    " || { echo "[resft] $name SWAP FAILED — left old model live"; docker start "$cont" >/dev/null 2>&1; return 1; }
   docker start "$cont" >/dev/null 2>&1 && echo "[resft] $name vLLM restarted on de-contaminated model"
 }
 

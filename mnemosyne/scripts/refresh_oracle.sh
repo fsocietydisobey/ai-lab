@@ -62,9 +62,17 @@ echo "[spark] SFT (full-FT) -> sft7b-khimaira-new ..."
 SZ=$(stat -c %s ~/mnemosyne/models/sft7b-khimaira-new/model.safetensors 2>/dev/null || echo 0)
 if [ "$SZ" -lt 10000000000 ]; then echo "[spark] VALIDATE FAILED: new model too small ($SZ)"; exit 1; fi
 echo "[spark] swap (keep .prev) + reload vLLM ..."
-rm -rf ~/mnemosyne/models/sft7b-khimaira.prev
-[ -d ~/mnemosyne/models/sft7b-khimaira ] && mv ~/mnemosyne/models/sft7b-khimaira ~/mnemosyne/models/sft7b-khimaira.prev
-mv ~/mnemosyne/models/sft7b-khimaira-new ~/mnemosyne/models/sft7b-khimaira
+# The model dirs are written by the training container as ROOT, so the host
+# user CANNOT mv them (Permission denied) — the swap MUST run as root, via a
+# throwaway container with the same bind-mount. `bash -euc` aborts on any
+# failed mv so we never falsely report success while serving a stale model.
+docker run --rm -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05 \
+  bash -euc '
+    cd /workspace/mnemosyne/models
+    rm -rf sft7b-khimaira.prev
+    if [ -d sft7b-khimaira ]; then mv sft7b-khimaira sft7b-khimaira.prev; fi
+    mv sft7b-khimaira-new sft7b-khimaira
+  ' || { echo "[spark] SWAP FAILED — model dirs unchanged, vLLM stays on old"; exit 1; }
 docker restart mnemo-vllm >/dev/null && echo "[spark] vLLM restarted on new model"
 REMOTE
 RC=$?
