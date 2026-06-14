@@ -26,8 +26,15 @@ cd "$LOCAL_MNEMO" || die "no mnemosyne dir at $LOCAL_MNEMO"
 log "building CPT corpus from $KHIMAIRA_REPO ..."
 "$PY" scripts/build_corpus.py --repo "$KHIMAIRA_REPO" --out-dir corpora/khimaira --eval-frac 0.1 \
   || die "corpus build"
-log "exporting SFT pairs from mnemosyne store ..."
-"$PY" scripts/export_sft_pairs.py --prefixes khimaira general \
+log "building clean general slice (dolly) for anti-forgetting ..."
+"$PY" scripts/fetch_general.py --n 2500 --out corpora/general_clean.jsonl \
+  || die "general slice"
+log "exporting SFT pairs (khimaira store + clean general + ground-truth) ..."
+# NOTE: --prefixes khimaira ONLY. The store's `general` domain is mislabeled
+# khimaira trivia that contaminates general answers; clean general comes from
+# general_clean.jsonl instead. See B-fix (2026-06).
+"$PY" scripts/export_sft_pairs.py --prefixes khimaira \
+  --extra-jsonl corpora/general_clean.jsonl \
   --extra-jsonl corpora/ground_truth_khimaira.jsonl \
   --out corpora/sft_khimaira.jsonl \
   || die "pairs export"
