@@ -22,6 +22,23 @@ die() { log "FATAL: $*"; exit 1; }
 log "================= oracle re-bake START ================="
 cd "$LOCAL_MNEMO" || die "no mnemosyne dir at $LOCAL_MNEMO"
 
+# 0. Pre-bake: distill ACTIVE, SETTLED master/lead sessions into the store so this
+# cycle's in-flight knowledge (long-lived sessions that never hit Stop) is captured
+# BEFORE the SFT export reads the store. Guards live in the tool: settled-only
+# (idle >= 30m, so no mid-flight wrong reasoning) + masters/leads-only. Runs in the
+# KHIMAIRA venv (needs the session registry + transcript + distill machinery).
+# Non-fatal: the tool always exits 0 and fail-opens, so a distill hiccup (e.g. the
+# distill service down) never blocks the bake.
+KHIMAIRA_PY="${KHIMAIRA_REPO}/.venv/bin/python"
+if [ -x "$KHIMAIRA_PY" ]; then
+  log "pre-bake: distilling active settled khimaira sessions ..."
+  "$KHIMAIRA_PY" -m khimaira.tools.distill_active_sessions \
+    --project-root "$KHIMAIRA_REPO" --project khimaira --settle-min 30 \
+    || log "active-session distill returned nonzero (non-fatal — continuing)"
+else
+  log "pre-bake: khimaira venv not at $KHIMAIRA_PY — skipping active-session distill"
+fi
+
 # 1. Build fresh corpus + SFT pairs locally (clean-corpus: source never ships).
 log "building CPT corpus from $KHIMAIRA_REPO ..."
 "$PY" scripts/build_corpus.py --repo "$KHIMAIRA_REPO" --out-dir corpora/khimaira --eval-frac 0.1 \
