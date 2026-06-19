@@ -33,7 +33,12 @@ log "exporting SFT pairs (khimaira store + clean general + ground-truth) ..."
 # NOTE: --prefixes khimaira ONLY. The store's `general` domain is mislabeled
 # khimaira trivia that contaminates general answers; clean general comes from
 # general_clean.jsonl instead. See B-fix (2026-06).
-"$PY" scripts/export_sft_pairs.py --prefixes khimaira \
+# NOTE: escaped-bugs:khimaira is a SEPARATE prefix — the bare `khimaira` prefix
+# only matches `khimaira:*`, so without naming it the captured escaped-bug pairs
+# (green-tests-broke-live → seam-class → catching-test) silently never reach the
+# oracle. These are curated + audit-grade (post-mortem, settled), so unlike active-
+# session distills there's no mid-flight-wrong-reasoning risk in baking them.
+"$PY" scripts/export_sft_pairs.py --prefixes khimaira escaped-bugs:khimaira \
   --extra-jsonl corpora/general_clean.jsonl \
   --extra-jsonl corpora/ground_truth_khimaira.jsonl \
   --out corpora/sft_khimaira.jsonl \
@@ -44,42 +49,19 @@ log "rsync corpora + scripts -> $SPARK ..."
 rsync -az -e "$SSH" corpora/ "$SPARK:~/mnemosyne/corpora/"  || die "rsync corpora"
 rsync -az -e "$SSH" scripts/ "$SPARK:~/mnemosyne/scripts/"  || die "rsync scripts"
 
-# 3-6. Train + validate + safe-swap + reload, all on spark.
-log "training on spark (CPT ~32m + SFT ~1.5h) ..."
-$SSH "$SPARK" 'bash -s' <<'REMOTE'
-set -uo pipefail
-cd ~/mnemosyne || exit 1
-DK=(docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
-    -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05)
-echo "[spark] CPT (full-FT) ..."
-"${DK[@]}" python scripts/pretrain.py --corpus-dir corpora/khimaira \
-  --model Qwen/Qwen2.5-Coder-7B --full-ft --epochs 1 --block-size 1024 \
-  --batch-size 1 --grad-accum 8 --out-name cpt7b-khimaira || { echo "[spark] CPT FAILED"; exit 1; }
-echo "[spark] SFT (full-FT) -> sft7b-khimaira-new ..."
-"${DK[@]}" python scripts/train.py --full-ft --model models/cpt7b-khimaira \
-  --pairs-file corpora/sft_khimaira.jsonl --epochs 2 --batch-size 2 --grad-accum 4 \
-  --out-name sft7b-khimaira-new || { echo "[spark] SFT FAILED"; exit 1; }
-SZ=$(stat -c %s ~/mnemosyne/models/sft7b-khimaira-new/model.safetensors 2>/dev/null || echo 0)
-if [ "$SZ" -lt 10000000000 ]; then echo "[spark] VALIDATE FAILED: new model too small ($SZ)"; exit 1; fi
-echo "[spark] swap (keep .prev) + reload vLLM ..."
-# The model dirs are written by the training container as ROOT, so the host
-# user CANNOT mv them (Permission denied) — the swap MUST run as root, via a
-# throwaway container with the same bind-mount. `bash -euc` aborts on any
-# failed mv so we never falsely report success while serving a stale model.
-docker run --rm -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05 \
-  bash -euc '
-    cd /workspace/mnemosyne/models
-    rm -rf sft7b-khimaira.prev
-    if [ -d sft7b-khimaira ]; then mv sft7b-khimaira sft7b-khimaira.prev; fi
-    mv sft7b-khimaira-new sft7b-khimaira
-  ' || { echo "[spark] SWAP FAILED — model dirs unchanged, vLLM stays on old"; exit 1; }
-docker restart mnemo-vllm >/dev/null && echo "[spark] vLLM restarted on new model"
-REMOTE
-RC=$?
+# 3-6. Launch train + validate + safe-swap + reload DETACHED ON SPARK.
+# The whole ~2h sequence runs on the spark via setsid+nohup, so it survives the
+# laptop suspending / the SSH dropping (the original blocking heredoc died on
+# laptop sleep — the exact "I'll be asleep at the scheduled time" failure). The
+# laptop's only job is: build corpus -> ship -> KICK OFF -> exit. The bake then
+# runs to completion on the always-on spark, writing ~/refresh.status
+# (RUNNING|SUCCESS|FAILED:<stage>) + ~/refresh.log so we can check later.
+log "launching detached re-bake on spark (survives laptop suspend) ..."
+$SSH "$SPARK" 'setsid nohup bash ~/mnemosyne/scripts/refresh_remote.sh >> ~/refresh.log 2>&1 < /dev/null & echo "launched pid $!"' \
+  || die "launch detached re-bake"
 
-if [ "$RC" -eq 0 ]; then
-  log "================= oracle re-bake SUCCESS ================="
-else
-  log "===== oracle re-bake FAILED (rc=$RC) — LIVE MODEL UNCHANGED ====="
-fi
-exit "$RC"
+log "================= re-bake LAUNCHED (detached on spark) ================="
+log "It runs ~2h independent of this laptop. Check progress any time:"
+log "  ssh $SPARK 'cat ~/refresh.status; tail -5 ~/refresh.log'"
+log "On SUCCESS the spark swaps the model + restarts mnemo-vllm automatically."
+exit 0
