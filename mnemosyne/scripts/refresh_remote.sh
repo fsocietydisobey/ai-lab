@@ -1,41 +1,57 @@
 #!/usr/bin/env bash
 # Spark-side oracle re-bake: CPT -> SFT -> validate -> safe-swap -> reload vLLM.
-# Launched DETACHED by refresh_oracle.sh (nohup/setsid) so the ~2h bake survives
-# the laptop suspending / the SSH dropping — the whole sequence runs on the spark.
-# Logs to ~/refresh.log; writes ~/refresh.status (RUNNING|SUCCESS|FAILED:<stage>)
-# so the laptop can check completion on next wake without a held connection.
+# Parameterized by ORACLE (default "khimaira") so the khimaira AND jeevy oracles
+# share ONE remote bake. Launched DETACHED by refresh_oracle.sh / refresh_jeevy.sh
+# (setsid/nohup) so the multi-hour bake survives the laptop suspending / the SSH
+# dropping — the whole sequence runs on the always-on spark.
+#
+# Per-oracle status + log so the two runs never clobber each other:
+#   ~/refresh-$ORACLE.status   RUNNING | SUCCESS | FAILED:<stage>
+#   ~/refresh-$ORACLE.log      (the launcher redirects stdout/err here)
 set -uo pipefail
-cd ~/mnemosyne || { echo "no ~/mnemosyne" >&2; echo "FAILED:nodir" > ~/refresh.status; exit 1; }
 
-echo "RUNNING $(date '+%F %T')" > ~/refresh.status
-fail() { echo "FAILED:$1 $(date '+%F %T')" > ~/refresh.status; echo "[remote] FAILED at $1"; exit 1; }
+ORACLE="${ORACLE:-khimaira}"
+CPT_CORPUS="${CPT_CORPUS:-corpora/$ORACLE}"
+CPT_OUT="${CPT_OUT:-cpt7b-$ORACLE}"
+SFT_PAIRS="${SFT_PAIRS:-corpora/sft_$ORACLE.jsonl}"
+SFT_OUT="${SFT_OUT:-sft7b-$ORACLE}"
+VLLM_CONTAINER="${VLLM_CONTAINER:-mnemo-vllm}"
+STATUS="$HOME/refresh-$ORACLE.status"
+
+cd ~/mnemosyne || { echo "no ~/mnemosyne" >&2; echo "FAILED:nodir" > "$STATUS"; exit 1; }
+
+echo "RUNNING $(date '+%F %T')" > "$STATUS"
+fail() { echo "FAILED:$1 $(date '+%F %T')" > "$STATUS"; echo "[remote:$ORACLE] FAILED at $1"; exit 1; }
 
 DK=(docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
     -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05)
 
-echo "[remote $(date '+%T')] CPT (full-FT) ..."
-"${DK[@]}" python scripts/pretrain.py --corpus-dir corpora/khimaira \
+echo "[remote:$ORACLE $(date '+%T')] CPT (full-FT) on $CPT_CORPUS -> $CPT_OUT ..."
+"${DK[@]}" python scripts/pretrain.py --corpus-dir "$CPT_CORPUS" \
   --model Qwen/Qwen2.5-Coder-7B --full-ft --epochs 1 --block-size 1024 \
-  --batch-size 1 --grad-accum 8 --out-name cpt7b-khimaira || fail CPT
+  --batch-size 1 --grad-accum 8 --out-name "$CPT_OUT" || fail CPT
 
-echo "[remote $(date '+%T')] SFT (full-FT) -> sft7b-khimaira-new ..."
-"${DK[@]}" python scripts/train.py --full-ft --model models/cpt7b-khimaira \
-  --pairs-file corpora/sft_khimaira.jsonl --epochs 2 --batch-size 2 --grad-accum 4 \
-  --out-name sft7b-khimaira-new || fail SFT
+echo "[remote:$ORACLE $(date '+%T')] SFT (full-FT) $SFT_PAIRS -> ${SFT_OUT}-new ..."
+"${DK[@]}" python scripts/train.py --full-ft --model "models/$CPT_OUT" \
+  --pairs-file "$SFT_PAIRS" --epochs 2 --batch-size 2 --grad-accum 4 \
+  --out-name "${SFT_OUT}-new" || fail SFT
 
-SZ=$(stat -c %s ~/mnemosyne/models/sft7b-khimaira-new/model.safetensors 2>/dev/null || echo 0)
+SZ=$(stat -c %s "$HOME/mnemosyne/models/${SFT_OUT}-new/model.safetensors" 2>/dev/null || echo 0)
 [ "$SZ" -ge 10000000000 ] || fail "validate(new model $SZ < 10GB)"
 
-echo "[remote $(date '+%T')] swap (keep .prev) + reload vLLM ..."
-# Model dirs are ROOT-owned (training container) — swap via a root container.
+echo "[remote:$ORACLE $(date '+%T')] swap (keep .prev) + reload $VLLM_CONTAINER ..."
+# Model dirs are ROOT-owned (training container) — swap via a root container. The
+# inner script is DOUBLE-quoted so $SFT_OUT interpolates from the outer shell; the
+# value is a literal model name (no user input), so this is safe.
 docker run --rm -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05 \
-  bash -euc '
+  bash -euc "
     cd /workspace/mnemosyne/models
-    rm -rf sft7b-khimaira.prev
-    if [ -d sft7b-khimaira ]; then mv sft7b-khimaira sft7b-khimaira.prev; fi
-    mv sft7b-khimaira-new sft7b-khimaira
-  ' || fail swap
-docker restart mnemo-vllm >/dev/null && echo "[remote] vLLM restarted on new model"
+    rm -rf ${SFT_OUT}.prev
+    if [ -d ${SFT_OUT} ]; then mv ${SFT_OUT} ${SFT_OUT}.prev; fi
+    mv ${SFT_OUT}-new ${SFT_OUT}
+  " || fail swap
+docker restart "$VLLM_CONTAINER" >/dev/null \
+  && echo "[remote:$ORACLE] $VLLM_CONTAINER restarted on new model"
 
-echo "SUCCESS $(date '+%F %T')" > ~/refresh.status
-echo "[remote $(date '+%T')] ================= re-bake SUCCESS ================="
+echo "SUCCESS $(date '+%F %T')" > "$STATUS"
+echo "[remote:$ORACLE $(date '+%T')] ================= re-bake SUCCESS ================="

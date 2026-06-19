@@ -74,11 +74,14 @@ rsync -az -e "$SSH" scripts/ "$SPARK:~/mnemosyne/scripts/"  || die "rsync script
 # runs to completion on the always-on spark, writing ~/refresh.status
 # (RUNNING|SUCCESS|FAILED:<stage>) + ~/refresh.log so we can check later.
 log "launching detached re-bake on spark (survives laptop suspend) ..."
-$SSH "$SPARK" 'setsid nohup bash ~/mnemosyne/scripts/refresh_remote.sh >> ~/refresh.log 2>&1 < /dev/null & echo "launched pid $!"' \
+# ORACLE=khimaira (the default) → refresh_remote.sh writes ~/refresh-khimaira.status
+# and bounces the mnemo-vllm (khimaira) container. Per-oracle log so a concurrent
+# jeevy bake doesn't interleave.
+$SSH "$SPARK" 'ORACLE=khimaira setsid nohup bash ~/mnemosyne/scripts/refresh_remote.sh >> ~/refresh-khimaira.log 2>&1 < /dev/null & echo "launched pid $!"' \
   || die "launch detached re-bake"
 
 log "================= re-bake LAUNCHED (detached on spark) ================="
 log "It runs ~2h independent of this laptop. Check progress any time:"
-log "  ssh $SPARK 'cat ~/refresh.status; tail -5 ~/refresh.log'"
+log "  ssh $SPARK 'cat ~/refresh-khimaira.status; tail -5 ~/refresh-khimaira.log'"
 log "On SUCCESS the spark swaps the model + restarts mnemo-vllm automatically."
 exit 0
