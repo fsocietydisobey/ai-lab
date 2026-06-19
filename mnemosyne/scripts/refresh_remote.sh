@@ -16,12 +16,33 @@ CPT_OUT="${CPT_OUT:-cpt7b-$ORACLE}"
 SFT_PAIRS="${SFT_PAIRS:-corpora/sft_$ORACLE.jsonl}"
 SFT_OUT="${SFT_OUT:-sft7b-$ORACLE}"
 VLLM_CONTAINER="${VLLM_CONTAINER:-mnemo-vllm}"
+# ALL oracle vLLM containers — stopped for the bake to free the unified pool, then
+# restarted at the end. A full-FT 7.6B train + its save-step memory spike does NOT
+# fit alongside the always-on oracles (they reserve ~75/121GB), so the save was
+# SIGKILLed at "Writing model shards" every run. Stopping them is the weekly
+# maintenance window; mnemosyne_ask fail-opens while they're down.
+ALL_VLLM="${ALL_VLLM_CONTAINERS:-mnemo-vllm mnemo-vllm-jeevy}"
 STATUS="$HOME/refresh-$ORACLE.status"
 
 cd ~/mnemosyne || { echo "no ~/mnemosyne" >&2; echo "FAILED:nodir" > "$STATUS"; exit 1; }
 
+# Restart the oracles unconditionally on exit (success OR failure) so a failed bake
+# never strands them down. Safe-swap means a failed model was never swapped in, so
+# each container restarts on its still-valid model dir.
+_restart_oracles() {
+  echo "[remote:$ORACLE] restarting vLLM oracles: $ALL_VLLM"
+  docker start $ALL_VLLM >/dev/null 2>&1 || true
+}
 echo "RUNNING $(date '+%F %T')" > "$STATUS"
-fail() { echo "FAILED:$1 $(date '+%F %T')" > "$STATUS"; echo "[remote:$ORACLE] FAILED at $1"; exit 1; }
+fail() {
+  echo "FAILED:$1 $(date '+%F %T')" > "$STATUS"
+  echo "[remote:$ORACLE] FAILED at $1"
+  _restart_oracles
+  exit 1
+}
+
+echo "[remote:$ORACLE] freeing GPU pool — stopping vLLM oracles: $ALL_VLLM"
+docker stop $ALL_VLLM >/dev/null 2>&1 || true
 
 DK=(docker run --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
     -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05)
@@ -50,8 +71,10 @@ docker run --rm -v "$HOME/mnemosyne:/workspace/mnemosyne" mnemosyne-train:26.05 
     if [ -d ${SFT_OUT} ]; then mv ${SFT_OUT} ${SFT_OUT}.prev; fi
     mv ${SFT_OUT}-new ${SFT_OUT}
   " || fail swap
-docker restart "$VLLM_CONTAINER" >/dev/null \
-  && echo "[remote:$ORACLE] $VLLM_CONTAINER restarted on new model"
+# Restart ALL oracles. The baked one ($VLLM_CONTAINER) reloads from its now-swapped
+# model dir → serves the new model; the sibling restarts on its unchanged model.
+_restart_oracles
+echo "[remote:$ORACLE] $VLLM_CONTAINER now serving the newly-baked model"
 
 echo "SUCCESS $(date '+%F %T')" > "$STATUS"
 echo "[remote:$ORACLE $(date '+%T')] ================= re-bake SUCCESS ================="
